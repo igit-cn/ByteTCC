@@ -16,24 +16,20 @@
 package org.bytesoft.bytetcc.supports.springcloud.web;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
+import java.util.Base64;
 
 import org.apache.commons.lang3.StringUtils;
 import org.bytesoft.bytejta.supports.rpc.TransactionRequestImpl;
 import org.bytesoft.bytejta.supports.rpc.TransactionResponseImpl;
-import org.bytesoft.bytejta.supports.wire.RemoteCoordinator;
 import org.bytesoft.bytetcc.CompensableTransactionImpl;
 import org.bytesoft.bytetcc.supports.springcloud.SpringCloudBeanRegistry;
 import org.bytesoft.bytetcc.supports.springcloud.loadbalancer.CompensableLoadBalancerInterceptor;
-import org.bytesoft.common.utils.ByteUtils;
-import org.bytesoft.common.utils.CommonUtils;
+import org.bytesoft.common.utils.SerializeUtils;
 import org.bytesoft.compensable.CompensableBeanFactory;
 import org.bytesoft.compensable.CompensableManager;
 import org.bytesoft.compensable.TransactionContext;
 import org.bytesoft.compensable.aware.CompensableEndpointAware;
-import org.bytesoft.transaction.archive.XAResourceArchive;
+import org.bytesoft.transaction.remote.RemoteCoordinator;
 import org.bytesoft.transaction.supports.rpc.TransactionInterceptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,18 +44,19 @@ import org.springframework.http.client.ClientHttpResponse;
 import org.springframework.web.client.HttpClientErrorException;
 
 import com.netflix.loadbalancer.Server;
-import com.netflix.loadbalancer.Server.MetaInfo;
 
 public class CompensableRequestInterceptor
 		implements ClientHttpRequestInterceptor, CompensableEndpointAware, ApplicationContextAware {
 	static final Logger logger = LoggerFactory.getLogger(CompensableRequestInterceptor.class);
 
-	static final String HEADER_TRANCACTION_KEY = "org.bytesoft.bytetcc.transaction";
-	static final String HEADER_PROPAGATION_KEY = "org.bytesoft.bytetcc.propagation";
+	static final String HEADER_TRANCACTION_KEY = "X-BYTETCC-TRANSACTION"; // org.bytesoft.bytetcc.transaction
+	static final String HEADER_PROPAGATION_KEY = "X-BYTETCC-PROPAGATION"; // org.bytesoft.bytetcc.propagation
+	static final String HEADER_RECURSIVELY_KEY = "X-BYTETCC-RECURSIVELY"; // org.bytesoft.bytetcc.recursively
 	static final String PREFIX_TRANSACTION_KEY = "/org/bytesoft/bytetcc";
 
 	private String identifier;
 	private ApplicationContext applicationContext;
+	private volatile boolean statefully;
 
 	public ClientHttpResponse intercept(final HttpRequest httpRequest, byte[] body, ClientHttpRequestExecution execution)
 			throws IOException {
@@ -68,7 +65,7 @@ public class CompensableRequestInterceptor
 		CompensableBeanFactory beanFactory = beanRegistry.getBeanFactory();
 		CompensableManager compensableManager = beanFactory.getCompensableManager();
 
-		CompensableTransactionImpl compensable = //
+		final CompensableTransactionImpl compensable = //
 				(CompensableTransactionImpl) compensableManager.getCompensableTransactionQuietly();
 
 		String path = httpRequest.getURI().getPath();
@@ -83,62 +80,22 @@ public class CompensableRequestInterceptor
 			return execution.execute(httpRequest, body);
 		}
 
-		// final String serviceId = uri.getAuthority();
-
-		final Map<String, XAResourceArchive> participants = compensable.getParticipantArchiveMap();
-		beanRegistry.setLoadBalancerInterceptor(new CompensableLoadBalancerInterceptor() {
-			public List<Server> beforeCompletion(List<Server> servers) {
-				final List<Server> readyServerList = new ArrayList<Server>();
-				final List<Server> unReadyServerList = new ArrayList<Server>();
-
-				for (int i = 0; servers != null && i < servers.size(); i++) {
-					Server server = servers.get(i);
-					MetaInfo metaInfo = server.getMetaInfo();
-					// String instanceId = metaInfo.getInstanceId();
-
-					String host = server.getHost();
-					String appName = metaInfo.getAppName();
-					int port = server.getPort();
-					String instanceId = String.format("%s:%s:%s", host, appName, port);
-
-					if (participants.containsKey(instanceId)) {
-						List<Server> serverList = new ArrayList<Server>();
-						serverList.add(server);
-						return serverList;
-					} // end-if (participants.containsKey(instanceId))
-
-					if (server.isReadyToServe()) {
-						readyServerList.add(server);
-					} else {
-						unReadyServerList.add(server);
-					}
-
-				}
-
-				logger.warn("There is no suitable server: expect= {}, actual= {}!", participants.keySet(), servers);
-				return readyServerList.isEmpty() ? unReadyServerList : readyServerList;
-			}
-
+		beanRegistry.setLoadBalancerInterceptor(new CompensableLoadBalancerInterceptor(this.statefully) {
 			public void afterCompletion(Server server) {
 				if (server == null) {
 					logger.warn(
 							"There is no suitable server, the TransactionInterceptor.beforeSendRequest() operation is not executed!");
 					return;
-				} else {
-					try {
-						MetaInfo metaInfo = server.getMetaInfo();
-
-						String host = server.getHost();
-						String appName = metaInfo.getAppName();
-						int port = server.getPort();
-						String instanceId = String.format("%s:%s:%s", host, appName, port);
-						// String instanceId = metaInfo.getInstanceId();
-
-						invokeBeforeSendRequest(httpRequest, instanceId);
-					} catch (IOException ex) {
-						throw new RuntimeException(ex);
-					}
 				}
+
+				try {
+					String instanceId = this.getInstanceId(server);
+
+					invokeBeforeSendRequest(httpRequest, instanceId);
+				} catch (IOException ex) {
+					throw new RuntimeException(ex);
+				}
+
 			}
 		});
 
@@ -172,8 +129,8 @@ public class CompensableRequestInterceptor
 
 		TransactionContext transactionContext = compensable.getTransactionContext();
 
-		byte[] reqByteArray = CommonUtils.serializeObject(transactionContext);
-		String reqTransactionStr = ByteUtils.byteArrayToString(reqByteArray);
+		byte[] reqByteArray = SerializeUtils.serializeObject(transactionContext);
+		String reqTransactionStr = Base64.getEncoder().encodeToString(reqByteArray);
 
 		HttpHeaders reqHeaders = httpRequest.getHeaders();
 		reqHeaders.add(HEADER_TRANCACTION_KEY, reqTransactionStr);
@@ -195,15 +152,19 @@ public class CompensableRequestInterceptor
 		HttpHeaders respHeaders = httpResponse.getHeaders();
 		String respTransactionStr = respHeaders.getFirst(HEADER_TRANCACTION_KEY);
 		String respPropagationStr = respHeaders.getFirst(HEADER_PROPAGATION_KEY);
+		String respRecursivelyStr = respHeaders.getFirst(HEADER_RECURSIVELY_KEY);
 
-		byte[] byteArray = ByteUtils.stringToByteArray(StringUtils.trimToNull(respTransactionStr));
-		TransactionContext serverContext = (TransactionContext) CommonUtils.deserializeObject(byteArray);
+		String transactionText = StringUtils.trimToNull(respTransactionStr);
+		byte[] byteArray = StringUtils.isBlank(transactionText) ? null : Base64.getDecoder().decode(transactionText);
+		TransactionContext serverContext = byteArray == null || byteArray.length == 0 //
+				? null
+				: (TransactionContext) SerializeUtils.deserializeObject(byteArray);
 
 		TransactionResponseImpl txResp = new TransactionResponseImpl();
 		txResp.setTransactionContext(serverContext);
 		RemoteCoordinator serverCoordinator = beanRegistry.getConsumeCoordinator(respPropagationStr);
 		txResp.setSourceTransactionCoordinator(serverCoordinator);
-		txResp.setParticipantDelistFlag(serverFlag ? false : true);
+		txResp.setParticipantDelistFlag(serverFlag ? StringUtils.equalsIgnoreCase(respRecursivelyStr, "TRUE") : true);
 
 		transactionInterceptor.afterReceiveResponse(txResp);
 	}
@@ -214,6 +175,18 @@ public class CompensableRequestInterceptor
 
 	public void setApplicationContext(ApplicationContext applicationContext) throws BeansException {
 		this.applicationContext = applicationContext;
+	}
+
+	public boolean isStatefully() {
+		return statefully;
+	}
+
+	public void setStatefully(boolean statefully) {
+		this.statefully = statefully;
+	}
+
+	public String getEndpoint() {
+		return this.identifier;
 	}
 
 	public void setEndpoint(String identifier) {

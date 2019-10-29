@@ -20,7 +20,7 @@ import java.util.List;
 
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.InitializingBean;
-import org.springframework.cloud.netflix.feign.support.SpringMvcContract;
+import org.springframework.cloud.openfeign.support.SpringMvcContract;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
 
@@ -71,7 +71,7 @@ public class CompensableFeignContract implements feign.Contract, InitializingBea
 		for (int i = 0; metas != null && i < metas.size(); i++) {
 			MethodMetadata meta = metas.get(i);
 			if (meta.returnType() == void.class) {
-				meta.returnType(Void.class);
+				meta.returnType(String.class);
 			}
 		}
 		return metas == null ? new ArrayList<MethodMetadata>() : metas;

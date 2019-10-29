@@ -15,27 +15,25 @@
  */
 package org.bytesoft.bytetcc.supports.dubbo;
 
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
-
-import org.bytesoft.bytejta.supports.wire.RemoteCoordinator;
 import org.bytesoft.compensable.CompensableBeanFactory;
 import org.bytesoft.compensable.aware.CompensableBeanFactoryAware;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextAware;
+import org.springframework.context.EnvironmentAware;
+import org.springframework.core.env.Environment;
 
-public final class CompensableBeanRegistry implements CompensableBeanFactoryAware {
+public final class CompensableBeanRegistry implements CompensableBeanFactoryAware, ApplicationContextAware, EnvironmentAware {
 	static final Logger logger = LoggerFactory.getLogger(CompensableBeanRegistry.class);
 	private static final CompensableBeanRegistry instance = new CompensableBeanRegistry();
 
+	private ApplicationContext applicationContext;
+	private Environment environment;
 	@javax.inject.Inject
 	private CompensableBeanFactory beanFactory;
-	private RemoteCoordinator consumeCoordinator;
-
-	private Lock lock = new ReentrantLock();
-	private Condition condition = this.lock.newCondition();
 
 	private CompensableBeanRegistry() {
 		if (instance != null) {
@@ -47,40 +45,20 @@ public final class CompensableBeanRegistry implements CompensableBeanFactoryAwar
 		return instance;
 	}
 
-	public RemoteCoordinator getConsumeCoordinator() {
-		if (this.consumeCoordinator != null) {
-			return this.consumeCoordinator;
-		} else {
-			return this.doGetConsumeCoordinator();
+	public <T> T getBean(Class<T> requiredType) {
+		try {
+			return this.applicationContext.getBean(requiredType);
+		} catch (NoSuchBeanDefinitionException error) {
+			return null; // ignore
 		}
 	}
 
-	private RemoteCoordinator doGetConsumeCoordinator() {
-		try {
-			this.lock.lock();
-			while (this.consumeCoordinator == null) {
-				try {
-					this.condition.await(1, TimeUnit.SECONDS);
-				} catch (InterruptedException ex) {
-					logger.debug(ex.getMessage());
-				}
-			}
-
-			// ConsumeCoordinator is injected by the CompensableConfigPostProcessor, which has a slight delay.
-			return consumeCoordinator;
-		} finally {
-			this.lock.unlock();
-		}
+	public Environment getEnvironment() {
+		return environment;
 	}
 
-	public void setConsumeCoordinator(RemoteCoordinator consumeCoordinator) {
-		try {
-			this.lock.lock();
-			this.consumeCoordinator = consumeCoordinator;
-			this.condition.signalAll();
-		} finally {
-			this.lock.unlock();
-		}
+	public void setEnvironment(Environment environment) {
+		this.environment = environment;
 	}
 
 	public void setBeanFactory(CompensableBeanFactory tbf) {
@@ -89,6 +67,10 @@ public final class CompensableBeanRegistry implements CompensableBeanFactoryAwar
 
 	public CompensableBeanFactory getBeanFactory() {
 		return beanFactory;
+	}
+
+	public void setApplicationContext(ApplicationContext applicationContext) throws BeansException {
+		this.applicationContext = applicationContext;
 	}
 
 }

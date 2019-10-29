@@ -24,10 +24,12 @@ import java.util.Map;
 import org.apache.commons.lang3.StringUtils;
 import org.bytesoft.common.utils.ByteUtils;
 import org.bytesoft.common.utils.CommonUtils;
+import org.bytesoft.common.utils.SerializeUtils;
 import org.bytesoft.compensable.archive.CompensableArchive;
 import org.bytesoft.compensable.archive.TransactionArchive;
 import org.bytesoft.transaction.archive.XAResourceArchive;
 import org.bytesoft.transaction.logging.ArchiveDeserializer;
+import org.bytesoft.transaction.remote.RemoteNode;
 import org.bytesoft.transaction.xa.TransactionXid;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,14 +45,14 @@ public class TransactionArchiveDeserializer extends org.bytesoft.bytejta.logging
 		TransactionArchive archive = (TransactionArchive) obj;
 
 		String propagatedBy = String.valueOf(archive.getPropagatedBy());
-		String[] address = propagatedBy.split("\\s*\\:\\s*");
+		RemoteNode remoteNode = CommonUtils.getRemoteNode(propagatedBy);
 		byte[] hostByteArray = new byte[4];
 		byte[] nameByteArray = new byte[0];
 		byte[] portByteArray = new byte[2];
-		if (address.length == 3) {
-			String hostStr = address[0];
-			String nameStr = address[1];
-			String portStr = address[2];
+		if (remoteNode != null) {
+			String hostStr = remoteNode.getServerHost();
+			String nameStr = remoteNode.getServiceKey();
+			String portStr = String.valueOf(remoteNode.getServerPort());
 
 			String[] hostArray = hostStr.split("\\s*\\.\\s*");
 			for (int i = 0; hostArray.length == 4 && i < hostArray.length; i++) {
@@ -84,7 +86,7 @@ public class TransactionArchiveDeserializer extends org.bytesoft.bytejta.logging
 			varByteArray = ByteUtils.shortToByteArray((short) 0);
 		} else {
 			try {
-				byte[] textByteArray = CommonUtils.serializeObject((Serializable) archive.getVariables());
+				byte[] textByteArray = SerializeUtils.serializeObject((Serializable) archive.getVariables());
 				byte[] sizeByteArray = ByteUtils.shortToByteArray((short) textByteArray.length);
 				varByteArray = new byte[sizeByteArray.length + textByteArray.length];
 				System.arraycopy(sizeByteArray, 0, varByteArray, 0, sizeByteArray.length);
@@ -95,7 +97,10 @@ public class TransactionArchiveDeserializer extends org.bytesoft.bytejta.logging
 			}
 		}
 
-		int length = 6 + 4 + 1 + nameByteArray.length + 2 + varByteArray.length + 2;
+		long recoveredMillis = archive.getRecoveredAt();
+		int recoveredTimes = archive.getRecoveredTimes();
+
+		int length = 6 + 4 + 1 + nameByteArray.length + 2 + varByteArray.length + 2 + 8 + 1;
 		byte[][] nativeByteArray = new byte[nativeArchiveNumber][];
 		for (int i = 0; i < nativeArchiveNumber; i++) {
 			CompensableArchive compensableArchive = nativeArchiveList.get(i);
@@ -148,6 +153,11 @@ public class TransactionArchiveDeserializer extends org.bytesoft.bytejta.logging
 
 		System.arraycopy(varByteArray, 0, byteArray, position, varByteArray.length);
 		position = position + varByteArray.length;
+
+		byteArray[position++] = (byte) (recoveredTimes - 128);
+		byte[] millisByteArray = ByteUtils.longToByteArray(recoveredMillis);
+		System.arraycopy(millisByteArray, 0, byteArray, position, millisByteArray.length);
+		position = position + millisByteArray.length;
 
 		byteArray[position++] = (byte) nativeArchiveNumber;
 		byteArray[position++] = (byte) remoteArchiveNumber;
@@ -218,7 +228,7 @@ public class TransactionArchiveDeserializer extends org.bytesoft.bytejta.logging
 
 			Map<String, Serializable> variables = null;
 			try {
-				variables = (Map<String, Serializable>) CommonUtils.deserializeObject(varByteArray);
+				variables = (Map<String, Serializable>) SerializeUtils.deserializeObject(varByteArray);
 			} catch (Exception ex) {
 				variables = new HashMap<String, Serializable>();
 				logger.error("Error occurred while deserializing object: {}", varByteArray, ex);
@@ -226,6 +236,13 @@ public class TransactionArchiveDeserializer extends org.bytesoft.bytejta.logging
 
 			archive.setVariables(variables);
 		}
+
+		int recoveredTimes = 128 + buffer.get();
+		byte[] millisByteArray = new byte[8];
+		buffer.get(millisByteArray);
+		long recoveredAt = ByteUtils.byteArrayToLong(millisByteArray);
+		archive.setRecoveredTimes(recoveredTimes);
+		archive.setRecoveredAt(recoveredAt);
 
 		int nativeArchiveNumber = buffer.get();
 		int remoteArchiveNumber = buffer.get();

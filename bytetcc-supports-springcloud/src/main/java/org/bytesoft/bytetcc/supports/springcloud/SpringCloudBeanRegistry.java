@@ -18,11 +18,14 @@ package org.bytesoft.bytetcc.supports.springcloud;
 import java.lang.reflect.Proxy;
 
 import org.apache.commons.lang3.StringUtils;
-import org.bytesoft.bytejta.supports.wire.RemoteCoordinator;
-import org.bytesoft.bytejta.supports.wire.RemoteCoordinatorRegistry;
+import org.bytesoft.bytejta.supports.internal.RemoteCoordinatorRegistry;
 import org.bytesoft.bytetcc.supports.springcloud.loadbalancer.CompensableLoadBalancerInterceptor;
+import org.bytesoft.common.utils.CommonUtils;
 import org.bytesoft.compensable.CompensableBeanFactory;
 import org.bytesoft.compensable.aware.CompensableBeanFactoryAware;
+import org.bytesoft.transaction.remote.RemoteAddr;
+import org.bytesoft.transaction.remote.RemoteCoordinator;
+import org.bytesoft.transaction.remote.RemoteNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.EnvironmentAware;
@@ -38,6 +41,7 @@ public final class SpringCloudBeanRegistry implements CompensableBeanFactoryAwar
 	private RestTemplate restTemplate;
 	private ThreadLocal<CompensableLoadBalancerInterceptor> interceptors = new ThreadLocal<CompensableLoadBalancerInterceptor>();
 	private Environment environment;
+	private transient boolean statefully;
 
 	private SpringCloudBeanRegistry() {
 		if (instance != null) {
@@ -50,25 +54,62 @@ public final class SpringCloudBeanRegistry implements CompensableBeanFactoryAwar
 	}
 
 	public RemoteCoordinator getConsumeCoordinator(String identifier) {
+		if (this.statefully) {
+			return this.getConsumeCoordinatorStatefully(identifier);
+		} else {
+			return this.getConsumeCoordinatorStateless(identifier);
+		}
+	}
+
+	public RemoteCoordinator getConsumeCoordinatorStatefully(String identifier) {
 		RemoteCoordinatorRegistry registry = RemoteCoordinatorRegistry.getInstance();
 		if (StringUtils.isBlank(identifier)) {
 			return null;
 		}
 
-		RemoteCoordinator coordinator = registry.getTransactionManagerStub(identifier);
-		if (coordinator != null) {
-			return coordinator;
-		}
+		RemoteAddr remoteAddr = CommonUtils.getRemoteAddr(identifier);
+		RemoteNode remoteNode = CommonUtils.getRemoteNode(identifier);
 
 		SpringCloudCoordinator handler = new SpringCloudCoordinator();
+		handler.setStatefully(this.statefully);
 		handler.setIdentifier(identifier);
 		handler.setEnvironment(this.environment);
 
-		coordinator = (RemoteCoordinator) Proxy.newProxyInstance(SpringCloudCoordinator.class.getClassLoader(),
-				new Class[] { RemoteCoordinator.class }, handler);
-		registry.putTransactionManagerStub(identifier, coordinator);
+		RemoteCoordinator participant = (RemoteCoordinator) Proxy.newProxyInstance(
+				SpringCloudCoordinator.class.getClassLoader(), new Class[] { RemoteCoordinator.class }, handler);
 
-		return coordinator;
+		registry.putRemoteNode(remoteAddr, remoteNode);
+
+		return participant;
+	}
+
+	public RemoteCoordinator getConsumeCoordinatorStateless(String identifier) {
+		RemoteCoordinatorRegistry registry = RemoteCoordinatorRegistry.getInstance();
+		if (StringUtils.isBlank(identifier)) {
+			return null;
+		}
+
+		String application = CommonUtils.getApplication(identifier);
+		RemoteCoordinator participant = registry.getParticipant(application);
+		if (participant != null) {
+			return participant;
+		}
+
+		RemoteAddr remoteAddr = CommonUtils.getRemoteAddr(identifier);
+		RemoteNode remoteNode = CommonUtils.getRemoteNode(identifier);
+
+		SpringCloudCoordinator handler = new SpringCloudCoordinator();
+		handler.setStatefully(this.statefully);
+		handler.setIdentifier(identifier);
+		handler.setEnvironment(this.environment);
+
+		participant = (RemoteCoordinator) Proxy.newProxyInstance(SpringCloudCoordinator.class.getClassLoader(),
+				new Class[] { RemoteCoordinator.class }, handler);
+
+		registry.putRemoteNode(remoteAddr, remoteNode);
+		registry.putParticipant(application, participant);
+
+		return participant;
 	}
 
 	public CompensableLoadBalancerInterceptor getLoadBalancerInterceptor() {
@@ -97,6 +138,14 @@ public final class SpringCloudBeanRegistry implements CompensableBeanFactoryAwar
 
 	public CompensableBeanFactory getBeanFactory() {
 		return beanFactory;
+	}
+
+	public boolean isStatefully() {
+		return statefully;
+	}
+
+	public void setStatefully(boolean statefully) {
+		this.statefully = statefully;
 	}
 
 	public Environment getEnvironment() {

@@ -16,6 +16,7 @@
 package org.bytesoft.bytetcc.logging;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -25,6 +26,7 @@ import javax.transaction.xa.Xid;
 
 import org.apache.commons.lang3.StringUtils;
 import org.bytesoft.bytejta.logging.store.VirtualLoggingSystemImpl;
+import org.bytesoft.common.utils.ByteUtils;
 import org.bytesoft.compensable.CompensableBeanFactory;
 import org.bytesoft.compensable.archive.CompensableArchive;
 import org.bytesoft.compensable.archive.TransactionArchive;
@@ -62,16 +64,25 @@ public class SampleCompensableLogger extends VirtualLoggingSystemImpl
 		}
 	}
 
-	public void updateTransaction(TransactionArchive archive) {
-		ArchiveDeserializer deserializer = this.beanFactory.getArchiveDeserializer();
-
-		try {
-			byte[] byteArray = deserializer.serialize((TransactionXid) archive.getXid(), archive);
-			this.modify(archive.getXid(), byteArray);
-		} catch (RuntimeException rex) {
-			logger.error("Error occurred while modifying transaction-archive.", rex);
-		}
+	public void updateTransactionVariables(TransactionArchive archive) {
 	}
+
+	public void updateTransactionStatus(TransactionArchive archive) {
+	}
+
+	public void updateTransactionRecoveryStatus(TransactionArchive archive) {
+	}
+
+//	public void updateTransaction(TransactionArchive archive) {
+//		ArchiveDeserializer deserializer = this.beanFactory.getArchiveDeserializer();
+//
+//		try {
+//			byte[] byteArray = deserializer.serialize((TransactionXid) archive.getXid(), archive);
+//			this.modify(archive.getXid(), byteArray);
+//		} catch (RuntimeException rex) {
+//			logger.error("Error occurred while modifying transaction-archive.", rex);
+//		}
+//	}
 
 	public void deleteTransaction(TransactionArchive archive) {
 		try {
@@ -81,7 +92,7 @@ public class SampleCompensableLogger extends VirtualLoggingSystemImpl
 		}
 	}
 
-	public void createCoordinator(XAResourceArchive archive) {
+	public void createParticipant(XAResourceArchive archive) {
 		ArchiveDeserializer deserializer = this.beanFactory.getArchiveDeserializer();
 
 		try {
@@ -92,15 +103,21 @@ public class SampleCompensableLogger extends VirtualLoggingSystemImpl
 		}
 	}
 
-	public void updateCoordinator(XAResourceArchive archive) {
-		ArchiveDeserializer deserializer = this.beanFactory.getArchiveDeserializer();
+	public void updateParticipantStatus(XAResourceArchive archive) {
+	}
 
-		try {
-			byte[] byteArray = deserializer.serialize((TransactionXid) archive.getXid(), archive);
-			this.modify(archive.getXid(), byteArray);
-		} catch (RuntimeException rex) {
-			logger.error("Error occurred while modifying resource-archive.", rex);
-		}
+//	public void updateParticipant(XAResourceArchive archive) {
+//		ArchiveDeserializer deserializer = this.beanFactory.getArchiveDeserializer();
+//
+//		try {
+//			byte[] byteArray = deserializer.serialize((TransactionXid) archive.getXid(), archive);
+//			this.modify(archive.getXid(), byteArray);
+//		} catch (RuntimeException rex) {
+//			logger.error("Error occurred while modifying resource-archive.", rex);
+//		}
+//	}
+
+	public void deleteParticipant(XAResourceArchive archive) {
 	}
 
 	public void createCompensable(CompensableArchive archive) {
@@ -115,16 +132,134 @@ public class SampleCompensableLogger extends VirtualLoggingSystemImpl
 		}
 	}
 
-	public void updateCompensable(CompensableArchive archive) {
-		ArchiveDeserializer deserializer = this.beanFactory.getArchiveDeserializer();
+	public void updateCompensableInvocationResource(CompensableArchive archive) {
+	}
 
-		try {
-			TransactionXid xid = (TransactionXid) archive.getIdentifier();
-			byte[] byteArray = deserializer.serialize(xid, archive);
-			this.modify(xid, byteArray);
-		} catch (RuntimeException rex) {
-			logger.error("Error occurred while modifying compensable-archive.", rex);
+	public void updateCompensableInvocationStatus(CompensableArchive archive) {
+	}
+
+	public void updateCompensableCompletionResource(CompensableArchive archive) {
+	}
+
+	public void updateCompensableCompletionStatus(CompensableArchive archive) {
+	}
+
+//	public void updateCompensable(CompensableArchive archive) {
+//		ArchiveDeserializer deserializer = this.beanFactory.getArchiveDeserializer();
+//
+//		try {
+//			TransactionXid xid = (TransactionXid) archive.getIdentifier();
+//			byte[] byteArray = deserializer.serialize(xid, archive);
+//			this.modify(xid, byteArray);
+//		} catch (RuntimeException rex) {
+//			logger.error("Error occurred while modifying compensable-archive.", rex);
+//		}
+//	}
+
+	public List<VirtualLoggingRecord> compressIfNecessary(List<VirtualLoggingRecord> recordList) {
+		ArchiveDeserializer deserializer = this.beanFactory.getArchiveDeserializer();
+		XidFactory xidFactory = this.beanFactory.getCompensableXidFactory();
+
+		List<VirtualLoggingRecord> resultList = new ArrayList<VirtualLoggingRecord>();
+
+		Map<TransactionXid, TransactionArchive> xidMap = new HashMap<TransactionXid, TransactionArchive>();
+		for (int index = 0; recordList != null && index < recordList.size(); index++) {
+			VirtualLoggingRecord record = recordList.get(index);
+			byte[] byteArray = record.getContent();
+			byte[] keyByteArray = new byte[XidFactory.GLOBAL_TRANSACTION_LENGTH];
+			System.arraycopy(byteArray, 0, keyByteArray, 0, keyByteArray.length);
+			byte[] valueByteArray = new byte[byteArray.length - XidFactory.GLOBAL_TRANSACTION_LENGTH - 1 - 4];
+			System.arraycopy(byteArray, XidFactory.GLOBAL_TRANSACTION_LENGTH + 1 + 4, valueByteArray, 0,
+					valueByteArray.length);
+
+			TransactionXid xid = xidFactory.createGlobalXid(keyByteArray);
+
+			Object obj = deserializer.deserialize(xid, valueByteArray);
+			if (TransactionArchive.class.isInstance(obj)) {
+				xidMap.put(xid, (TransactionArchive) obj);
+			} else if (XAResourceArchive.class.isInstance(obj)) {
+				TransactionArchive archive = xidMap.get(xid);
+				if (archive == null) {
+					logger.error("Error occurred while compressing resource archive: {}", obj);
+					continue;
+				}
+
+				XAResourceArchive resourceArchive = (XAResourceArchive) obj;
+				boolean matched = false;
+
+				List<XAResourceArchive> remoteResources = archive.getRemoteResources();
+				for (int i = 0; matched == false && remoteResources != null && i < remoteResources.size(); i++) {
+					XAResourceArchive element = remoteResources.get(i);
+					if (resourceArchive.getXid().equals(element.getXid())) {
+						matched = true;
+						remoteResources.set(i, resourceArchive);
+					}
+				}
+
+				if (matched == false) {
+					remoteResources.add(resourceArchive);
+				}
+			} else if (CompensableArchive.class.isInstance(obj)) {
+				TransactionArchive archive = xidMap.get(xid);
+				if (archive == null) {
+					logger.error("Error occurred while compressing compensable archive: {}", obj);
+					continue;
+				}
+
+				List<CompensableArchive> compensables = archive.getCompensableResourceList();
+				CompensableArchive resourceArchive = (CompensableArchive) obj;
+
+				boolean matched = false;
+				for (int i = 0; matched == false && compensables != null && i < compensables.size(); i++) {
+					CompensableArchive element = compensables.get(i);
+					if (resourceArchive.getIdentifier().equals(element.getIdentifier())) {
+						matched = true;
+						compensables.set(i, resourceArchive);
+					}
+				}
+
+				if (matched == false) {
+					compensables.add(resourceArchive);
+				}
+
+			} else {
+				logger.error("unkown resource: {}!", obj);
+			}
+		} // end-for (int index = 0; recordList != null && index < recordList.size(); index++)
+
+		for (Iterator<Map.Entry<TransactionXid, TransactionArchive>> itr = xidMap.entrySet().iterator(); itr
+				.hasNext();) {
+			Map.Entry<TransactionXid, TransactionArchive> entry = itr.next();
+			TransactionXid xid = entry.getKey();
+			TransactionArchive value = entry.getValue();
+
+			byte[] globalByteArray = xid.getGlobalTransactionId();
+
+			byte[] keyByteArray = new byte[XidFactory.GLOBAL_TRANSACTION_LENGTH];
+			byte[] valueByteArray = deserializer.serialize(xid, value);
+			byte[] sizeByteArray = ByteUtils.intToByteArray(valueByteArray.length);
+
+			System.arraycopy(globalByteArray, 0, keyByteArray, 0, XidFactory.GLOBAL_TRANSACTION_LENGTH);
+
+			byte[] byteArray = new byte[XidFactory.GLOBAL_TRANSACTION_LENGTH + 1 + 4 + valueByteArray.length];
+
+			System.arraycopy(keyByteArray, 0, byteArray, 0, keyByteArray.length);
+			byteArray[keyByteArray.length] = OPERATOR_CREATE;
+			System.arraycopy(sizeByteArray, 0, byteArray, XidFactory.GLOBAL_TRANSACTION_LENGTH + 1,
+					sizeByteArray.length);
+			System.arraycopy(valueByteArray, 0, byteArray, XidFactory.GLOBAL_TRANSACTION_LENGTH + 1 + 4,
+					valueByteArray.length);
+
+			VirtualLoggingRecord record = new VirtualLoggingRecord();
+			record.setIdentifier(xid);
+			record.setOperator(OPERATOR_CREATE);
+			record.setValue(valueByteArray);
+			record.setContent(byteArray);
+
+			resultList.add(record);
 		}
+
+		return resultList;
 	}
 
 	public void recover(TransactionRecoveryCallback callback) {
@@ -236,7 +371,7 @@ public class SampleCompensableLogger extends VirtualLoggingSystemImpl
 
 	public File getDefaultDirectory() {
 		String address = StringUtils.trimToEmpty(this.endpoint);
-		File directory = new File(String.format("bytetcc/%s", address.replaceAll("[^a-zA-Z_0-9]", "_")));
+		File directory = new File(String.format("bytetcc/%s", address.replaceAll("\\W", "_")));
 		if (directory.exists() == false) {
 			try {
 				directory.mkdirs();
@@ -248,11 +383,11 @@ public class SampleCompensableLogger extends VirtualLoggingSystemImpl
 	}
 
 	public int getMajorVersion() {
-		return 0;
+		return 1;
 	}
 
 	public int getMinorVersion() {
-		return 2;
+		return 0;
 	}
 
 	public String getLoggingFilePrefix() {
@@ -263,8 +398,16 @@ public class SampleCompensableLogger extends VirtualLoggingSystemImpl
 		return "org.bytesoft.bytetcc.logging.sample";
 	}
 
+	public CompensableBeanFactory getBeanFactory() {
+		return this.beanFactory;
+	}
+
 	public void setBeanFactory(CompensableBeanFactory tbf) {
 		this.beanFactory = tbf;
+	}
+
+	public String getEndpoint() {
+		return this.endpoint;
 	}
 
 	public void setEndpoint(String endpoint) {
