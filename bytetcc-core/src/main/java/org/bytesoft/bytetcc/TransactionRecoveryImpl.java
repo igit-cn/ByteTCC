@@ -15,13 +15,18 @@
  */
 package org.bytesoft.bytetcc;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.transaction.Status;
 import javax.transaction.SystemException;
 import javax.transaction.xa.XAException;
+import javax.transaction.xa.XAResource;
 import javax.transaction.xa.Xid;
 
 import org.apache.commons.lang3.StringUtils;
@@ -32,6 +37,7 @@ import org.bytesoft.common.utils.ByteUtils;
 import org.bytesoft.common.utils.CommonUtils;
 import org.bytesoft.compensable.CompensableBeanFactory;
 import org.bytesoft.compensable.CompensableManager;
+import org.bytesoft.compensable.TransactionBeanFactory;
 import org.bytesoft.compensable.TransactionContext;
 import org.bytesoft.compensable.archive.CompensableArchive;
 import org.bytesoft.compensable.aware.CompensableBeanFactoryAware;
@@ -64,8 +70,11 @@ public class TransactionRecoveryImpl
 
 	@javax.inject.Inject
 	protected CompensableBeanFactory beanFactory;
+	@javax.inject.Inject
+	protected TransactionBeanFactory transactionBeanFactory;
 	protected String endpoint;
 	protected transient boolean statefully;
+	protected volatile boolean initialized;
 
 	protected final Map<TransactionXid, Transaction> recovered = new HashMap<TransactionXid, Transaction>();
 
@@ -79,13 +88,16 @@ public class TransactionRecoveryImpl
 		this.recovered.put(globalXid, transaction);
 	}
 
-	public void startRecovery() {
+	public synchronized void startRecovery() {
 		this.fireTransactionStartRecovery();
 		this.fireCompensableStartRecovery();
+
+		// timingRecovery should be executed after initialization
+		this.initialized = true;
 	}
 
 	protected void fireTransactionStartRecovery() {
-		TransactionRecovery transactionRecovery = this.beanFactory.getTransactionRecovery();
+		TransactionRecovery transactionRecovery = this.transactionBeanFactory.getTransactionRecovery();
 		transactionRecovery.startRecovery();
 	}
 
@@ -99,7 +111,7 @@ public class TransactionRecoveryImpl
 			}
 
 			public void recover(org.bytesoft.compensable.archive.TransactionArchive archive) {
-				XidFactory transactionXidFactory = beanFactory.getTransactionXidFactory();
+				XidFactory transactionXidFactory = transactionBeanFactory.getTransactionXidFactory();
 
 				CompensableTransactionImpl transaction = reconstruct(archive);
 				TransactionContext transactionContext = transaction.getTransactionContext();
@@ -434,6 +446,111 @@ public class TransactionRecoveryImpl
 			compensableManager.desociateThread();
 		}
 
+	}
+
+	public synchronized void branchRecover() {
+		XAResourceDeserializer resourceDeserializer = this.beanFactory.getResourceDeserializer();
+		TransactionRepository transactionRepository = beanFactory.getCompensableRepository();
+
+		List<Transaction> transactions = new ArrayList<Transaction>();
+		transactions.addAll(transactionRepository.getActiveTransactionList());
+
+		Map<String, List<Transaction>> instanceMap = new HashMap<String, List<Transaction>>();
+		for (int i = 0; transactions != null && i < transactions.size(); i++) {
+			Transaction transaction = transactions.get(i);
+			Object txContext = transaction.getTransactionContext();
+			if (TransactionContext.class.isInstance(txContext) == false) {
+				continue; // ignore
+			}
+
+			TransactionContext transactionContext = (TransactionContext) txContext;
+			if (transactionContext.isCoordinator()) {
+				continue; // ignore
+			} else if (transactionContext.isCompensable() == false) {
+				continue; // ignore
+			}
+
+			String propagatedBy = String.valueOf(transactionContext.getPropagatedBy());
+			List<Transaction> transactionList = instanceMap.get(propagatedBy);
+			if (transactionList == null) {
+				transactionList = new ArrayList<Transaction>();
+				instanceMap.put(propagatedBy, transactionList);
+			}
+			transactionList.add(transaction);
+		}
+
+		Map<String, List<Transaction>> closedMap = new HashMap<String, List<Transaction>>();
+		for (Iterator<Map.Entry<String, List<Transaction>>> itr = instanceMap.entrySet().iterator(); itr.hasNext();) {
+			Map.Entry<String, List<Transaction>> entry = itr.next();
+			String identifier = entry.getKey();
+			List<Transaction> transactionList = entry.getValue();
+			XAResourceDescriptor resource = resourceDeserializer.deserialize(identifier);
+			Xid[] xidArray = null;
+			try {
+				xidArray = resource.recover(XAResource.TMSTARTRSCAN | XAResource.TMENDRSCAN);
+			} catch (XAException ex) {
+				continue; // ignore
+			}
+
+			Set<String> globals = new HashSet<String>();
+			for (int i = 0; xidArray != null && i < xidArray.length; i++) {
+				Xid xid = xidArray[i];
+				byte[] globalTransactionId = xid.getGlobalTransactionId();
+				String global = ByteUtils.byteArrayToString(globalTransactionId);
+				globals.add(global);
+			}
+
+			List<Transaction> errorTxList = new ArrayList<Transaction>();
+			for (int i = 0; transactionList != null && i < transactionList.size(); i++) {
+				Transaction transaction = transactionList.get(i);
+				org.bytesoft.transaction.TransactionContext transactionContext = transaction.getTransactionContext();
+				TransactionXid transactionXid = transactionContext.getXid();
+				byte[] globalTransactionId = transactionXid.getGlobalTransactionId();
+				String global = ByteUtils.byteArrayToString(globalTransactionId);
+				if (globals.contains(global) == false) {
+					errorTxList.add(transaction);
+				}
+			}
+
+			closedMap.put(identifier, errorTxList);
+		}
+
+		for (Iterator<Map.Entry<String, List<Transaction>>> itr = closedMap.entrySet().iterator(); itr.hasNext();) {
+			Map.Entry<String, List<Transaction>> entry = itr.next();
+			List<Transaction> transactionList = entry.getValue();
+			for (int i = 0; transactionList != null && i < transactionList.size(); i++) {
+				Transaction transaction = transactionList.get(i);
+				org.bytesoft.transaction.TransactionContext transactionContext = transaction.getTransactionContext();
+				TransactionXid xid = transactionContext.getXid();
+				try {
+					this.rollbackParticipant(transaction);
+				} catch (SystemException ex) {
+					logger.debug("{}| recover(rollback): branch={}, message= {}",
+							ByteUtils.byteArrayToString(xid.getGlobalTransactionId()),
+							ByteUtils.byteArrayToString(xid.getBranchQualifier()), ex.getMessage(), ex);
+					continue;
+				} catch (RuntimeException ex) {
+					logger.debug("{}| recover(rollback): branch={}, message= {}",
+							ByteUtils.byteArrayToString(xid.getGlobalTransactionId()),
+							ByteUtils.byteArrayToString(xid.getBranchQualifier()), ex.getMessage(), ex);
+					continue;
+				}
+			}
+		}
+	}
+
+	protected void rollbackParticipant(Transaction transaction) throws SystemException {
+		CompensableManager compensableManager = this.beanFactory.getCompensableManager();
+		try {
+			compensableManager.associateThread(transaction);
+			((CompensableTransactionImpl) transaction).fireRollback();
+		} finally {
+			compensableManager.desociateThread();
+		}
+	}
+
+	public boolean isInitialized() {
+		return initialized;
 	}
 
 	public boolean isStatefully() {

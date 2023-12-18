@@ -24,9 +24,7 @@ import org.bytesoft.bytetcc.CompensableTransactionImpl;
 import org.bytesoft.bytetcc.supports.springcloud.SpringCloudBeanRegistry;
 import org.bytesoft.bytetcc.supports.springcloud.feign.CompensableFeignResult;
 import org.bytesoft.bytetcc.supports.springcloud.loadbalancer.CompensableLoadBalancerInterceptor;
-import org.bytesoft.compensable.CompensableBeanFactory;
-import org.bytesoft.compensable.CompensableManager;
-import org.bytesoft.compensable.TransactionContext;
+import org.bytesoft.compensable.*;
 import org.bytesoft.transaction.remote.RemoteCoordinator;
 import org.bytesoft.transaction.supports.rpc.TransactionInterceptor;
 import org.slf4j.Logger;
@@ -50,7 +48,8 @@ public class CompensableHystrixMethodHandler implements MethodHandler {
 		final SpringCloudBeanRegistry beanRegistry = SpringCloudBeanRegistry.getInstance();
 		CompensableBeanFactory beanFactory = beanRegistry.getBeanFactory();
 		CompensableManager compensableManager = beanFactory.getCompensableManager();
-		final TransactionInterceptor transactionInterceptor = beanFactory.getTransactionInterceptor();
+		TransactionBeanFactory transactionBeanFactory = (TransactionBeanFactory) beanRegistry.getBeanFactory();
+		final TransactionInterceptor transactionInterceptor = transactionBeanFactory.getTransactionInterceptor();
 
 		CompensableHystrixInvocation invocation = (CompensableHystrixInvocation) argv[0];
 		Thread thread = invocation.getThread(); // (Thread) argv[0];
@@ -96,7 +95,8 @@ public class CompensableHystrixMethodHandler implements MethodHandler {
 		response.setTransactionContext(transactionContext);
 
 		try {
-			compensableManager.associateThread(compensable);
+			// compensableManager.attachThread(compensable);
+			this.attachThreadIfNecessary(thread);
 			return this.dispatch.get(method).invoke(args);
 		} catch (Throwable error) {
 			Throwable cause = error.getCause();
@@ -136,10 +136,32 @@ public class CompensableHystrixMethodHandler implements MethodHandler {
 					transactionInterceptor.afterReceiveResponse(response);
 				} // end-if (response.isIntercepted() == false)
 			} finally {
-				compensableManager.desociateThread();
+				// compensableManager.detachThread();
+				this.detachThreadIfNecessary(thread);
 			}
 		}
 
+	}
+
+	private void attachThreadIfNecessary(Thread thread) {
+		final SpringCloudBeanRegistry beanRegistry = SpringCloudBeanRegistry.getInstance();
+		CompensableBeanFactory beanFactory = beanRegistry.getBeanFactory();
+		CompensableManager compensableManager = beanFactory.getCompensableManager();
+
+		CompensableTransaction compensable = compensableManager.getCompensableTransaction(thread);
+		if (Thread.currentThread().equals(thread) == false) {
+			compensableManager.attachThread(compensable);
+		} // end-if (Thread.currentThread().equals(thread) == false)
+	}
+
+	private void detachThreadIfNecessary(Thread thread) {
+		final SpringCloudBeanRegistry beanRegistry = SpringCloudBeanRegistry.getInstance();
+		CompensableBeanFactory beanFactory = beanRegistry.getBeanFactory();
+		CompensableManager compensableManager = beanFactory.getCompensableManager();
+
+		if (Thread.currentThread().equals(thread) == false) {
+			compensableManager.detachThread();
+		} // end-if (Thread.currentThread().equals(thread) == false)
 	}
 
 	public boolean isStatefully() {
